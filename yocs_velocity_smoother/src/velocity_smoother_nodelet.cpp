@@ -51,6 +51,26 @@ void VelocitySmoother::reconfigCB(yocs_velocity_smoother::paramsConfig &config, 
   decel_factor = config.decel_factor;
   decel_lim_v  = decel_factor*accel_lim_v;
   decel_lim_w  = decel_factor*accel_lim_w;
+
+  calculate_landing_coefficient();
+
+}
+
+// calculate the next pose given a velocity command and a length of time
+void VelocitySmoother::dead_reckoning(const geometry_msgs::Twist & vel, geometry_msgs::Vector3 & pose, double time_in_secs) {
+
+  if (vel.angular.z != 0) {
+    // Equations 6, 7, and 8
+    double prev_z = pose.z;
+    pose.z = pose.z + vel.angular.z * time_in_secs;
+    pose.x = pose.x + vel.linear.x / vel.angular.z * ( sin(pose.z) - sin(prev_z) );
+    pose.y = pose.y + vel.linear.x / vel.angular.z * ( cos(pose.z) - cos(prev_z) );
+  } else {
+    // Equations 9, 10, and 11
+    pose.x = pose.x + vel.linear.x * time_in_secs * cos(pose.z);
+    pose.y = pose.y + vel.linear.x * time_in_secs * sin(pose.z);
+  }
+
 }
 
 void VelocitySmoother::velocityCB(const geometry_msgs::Twist::ConstPtr& msg)
@@ -88,6 +108,24 @@ void VelocitySmoother::velocityCB(const geometry_msgs::Twist::ConstPtr& msg)
       msg->linear.x  > 0.0 ? std::min(msg->linear.x,  speed_lim_v) : std::max(msg->linear.x,  -speed_lim_v);
   target_vel.angular.z =
       msg->angular.z > 0.0 ? std::min(msg->angular.z, speed_lim_w) : std::max(msg->angular.z, -speed_lim_w);
+
+  target_pos = geometry_msgs::Vector3();
+  dead_reckoning(target_vel, target_pos, cb_avg_time);
+  current_pos = geometry_msgs::Vector3();
+
+  calculate_landing_coefficient();
+}
+
+// recalculate Cx, equation 47
+void VelocitySmoother::calculate_landing_coefficient() {
+  // use 95% of the maximum value to allow for some error in the accelleration limits
+  if (target_vel.linear.x != 0)
+    landing_coef = 0.95 * accel_lim_w / (6 * target_vel.linear.x * target_vel.linear.x );
+  else
+    landing_coef = 100; // What should this be?
+
+  // fix this value for now for testing
+  landing_coef = 0.2;
 }
 
 void VelocitySmoother::odometryCB(const nav_msgs::Odometry::ConstPtr& msg)
@@ -151,81 +189,50 @@ void VelocitySmoother::spin()
     }
 
     geometry_msgs::TwistPtr cmd_vel;
+    cmd_vel.reset(new geometry_msgs::Twist(target_vel));
 
-    if ((target_vel.linear.x  != last_cmd_vel.linear.x) ||
-        (target_vel.angular.z != last_cmd_vel.angular.z))
-    {
-      // Try to reach target velocity ensuring that we don't exceed the acceleration limits
-      cmd_vel.reset(new geometry_msgs::Twist(target_vel));
+    // Implementation of Koh, K., & Cho, H. (1999). A smooth path tracking algorithm for wheeled mobile robots with dynamic constraints. Journal of Intelligent and Robotic Systems, 367–385. Retrieved from http://link.springer.com/article/10.1023/A:1008045202113
+    dead_reckoning(last_cmd_vel, current_pos, period);
 
-      double v_inc, w_inc, max_v_inc, max_w_inc;
+    // find error in position and velocity
+    double err_x = (target_pos.x - current_pos.x) * cos(target_pos.z) + (target_pos.y - current_pos.y) * sin(target_pos.z);
+    double err_y = (target_pos.x - current_pos.x) * sin(target_pos.z) + (target_pos.y - current_pos.y) * cos(target_pos.z);
+    double err_th = target_pos.z - current_pos.z;
 
-      v_inc = target_vel.linear.x - last_cmd_vel.linear.x;
-      if ((robot_feedback == ODOMETRY) && (current_vel.linear.x*target_vel.linear.x < 0.0))
-      {
-        // countermarch (on robots with significant inertia; requires odometry feedback to be detected)
-        max_v_inc = decel_lim_v*period;
-      }
-      else
-      {
-        max_v_inc = ((v_inc*target_vel.linear.x > 0.0)?accel_lim_v:decel_lim_v)*period;
-      }
+ //   ROS_WARN("Errors: %f, %f, %f", err_x, err_y, err_th);
 
-      w_inc = target_vel.angular.z - last_cmd_vel.angular.z;
-      if ((robot_feedback == ODOMETRY) && (current_vel.angular.z*target_vel.angular.z < 0.0))
-      {
-        // countermarch (on robots with significant inertia; requires odometry feedback to be detected)
-        max_w_inc = decel_lim_w*period;
-      }
-      else
-      {
-        max_w_inc = ((w_inc*target_vel.angular.z > 0.0)?accel_lim_w:decel_lim_w)*period;
-      }
+    // find new angular velocity command
+    // angle and velocity of the landing curve
+    double th_p = target_pos.z + atan( 3 * landing_coef * ( std::pow(std::abs(err_y / landing_coef), 2/3.0)) * sign(err_y));
+    double omega_p = target_vel.angular.z + err_y != 0 ? (2 / std::pow(std::abs(err_y / landing_coef), 1/3.0)) / (1 + tan(th_p - target_pos.z)*tan(th_p - target_pos.z)) * (-target_vel.angular.z * err_x + last_cmd_vel.linear.x * sin(err_th)) * sign(err_y) : 0;
 
-      // Calculate and normalise vectors A (desired velocity increment) and B (maximum velocity increment),
-      // where v acts as coordinate x and w as coordinate y; the sign of the angle from A to B determines
-      // which velocity (v or w) must be overconstrained to keep the direction provided as command
-      double MA = sqrt(    v_inc *     v_inc +     w_inc *     w_inc);
-      double MB = sqrt(max_v_inc * max_v_inc + max_w_inc * max_w_inc);
+//    ROS_WARN("Landing Curve: %f, %f", th_p, omega_p);
+//    ROS_WARN("Values: %f, %f, %f", landing_coef,  target_vel.angular.z, last_cmd_vel.linear.x);
 
-      double Av = std::abs(v_inc) / MA;
-      double Aw = std::abs(w_inc) / MA;
-      double Bv = max_v_inc / MB;
-      double Bw = max_w_inc / MB;
-      double theta = atan2(Bw, Bv) - atan2(Aw, Av);
 
-      if (theta < 0)
-      {
-        // overconstrain linear velocity
-        max_v_inc = (max_w_inc*std::abs(v_inc))/std::abs(w_inc);
-      }
-      else
-      {
-        // overconstrain angular velocity
-        max_w_inc = (max_v_inc*std::abs(w_inc))/std::abs(v_inc);
-      }
+    // angle and velocity subject to acceleration constraints
+    double omega_s = omega_p + sqrt(2 * accel_lim_w * std::abs(th_p - current_pos.z)) * sign(th_p - current_pos.z);
+    double ang_accel_limited = clamp_abs(omega_s / period, accel_lim_w) * sign(omega_s);
 
-      if (std::abs(v_inc) > max_v_inc)
-      {
-        // we must limit linear velocity
-        cmd_vel->linear.x  = last_cmd_vel.linear.x  + sign(v_inc)*max_v_inc;
-      }
+//    ROS_WARN("Angle and accel: %f, %f", omega_s, ang_accel_limited);
 
-      if (std::abs(w_inc) > max_w_inc)
-      {
-        // we must limit angular velocity
-        cmd_vel->angular.z = last_cmd_vel.angular.z + sign(w_inc)*max_w_inc;
-      }
+    // find new linear velocity command
+    double v_s = target_vel.linear.x - current_vel.linear.x * cos(err_th) + target_vel.angular.z*err_y + sqrt(2 * accel_lim_v * std::abs(err_x)) * sign(err_x);
+    double lin_accel_limited = clamp_abs(v_s / period, accel_lim_v) * sign(v_s);
 
-      smooth_vel_pub.publish(cmd_vel);
-      last_cmd_vel = *cmd_vel;
-    }
-    else if (input_active == true)
-    {
-      // We already reached target velocity; just keep resending last command while input is active
-      cmd_vel.reset(new geometry_msgs::Twist(last_cmd_vel));
-      smooth_vel_pub.publish(cmd_vel);
-    }
+//    ROS_WARN("Linear and accel: %f, %f", v_s, lin_accel_limited);
+
+    cmd_vel->angular.z = last_cmd_vel.angular.z + ang_accel_limited * period;
+    cmd_vel->linear.x = last_cmd_vel.linear.x + lin_accel_limited * period;
+
+//  For testing
+//    cmd_vel->angular.z = target_vel.angular.z;
+//    cmd_vel->linear.x = target_vel.linear.x;
+
+
+
+    smooth_vel_pub.publish(cmd_vel);
+    last_cmd_vel = *cmd_vel;
 
     spin_rate.sleep();
   }
@@ -277,6 +284,12 @@ bool VelocitySmoother::init(ros::NodeHandle& nh)
   // Deceleration can be more aggressive, if necessary
   decel_lim_v = decel_factor*accel_lim_v;
   decel_lim_w = decel_factor*accel_lim_w;
+
+  target_pos = geometry_msgs::Vector3();
+  target_vel = ZERO_VEL_COMMAND;
+  current_pos = geometry_msgs::Vector3();
+  current_vel = ZERO_VEL_COMMAND;
+  landing_coef = 0.2;
 
   // Publishers and subscribers
   odometry_sub    = nh.subscribe("odometry",      1, &VelocitySmoother::odometryCB, this);

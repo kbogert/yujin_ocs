@@ -61,9 +61,13 @@ private:
 
   double frequency;
 
-  geometry_msgs::Twist last_cmd_vel;
-  geometry_msgs::Twist  current_vel;
-  geometry_msgs::Twist   target_vel;
+  geometry_msgs::Twist  last_cmd_vel;
+  geometry_msgs::Twist   current_vel;
+  geometry_msgs::Vector3 current_pos;
+  geometry_msgs::Twist    target_vel;
+  geometry_msgs::Vector3  target_pos;
+
+  double landing_coef;
 
   bool                 shutdown_req; /**< Shutdown requested by nodelet; kill worker thread */
   bool                 input_active;
@@ -83,12 +87,19 @@ private:
 
   double sign(double x)  { return x < 0.0 ? -1.0 : +1.0; };
 
+  void dead_reckoning(const geometry_msgs::Twist & vel, geometry_msgs::Vector3 & pose, double time_in_secs);
+  void calculate_landing_coefficient();
+
   double median(std::vector<double> values) {
     // Return the median element of an doubles vector
     nth_element(values.begin(), values.begin() + values.size()/2, values.end());
     return values[values.size()/2];
   };
 
+
+  inline double clamp_abs (double a, double b) {
+    return std::abs(a) < b ? std::abs(a) : b;
+  }
   /*********************
   ** Dynamic Reconfigure
   **********************/
