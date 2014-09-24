@@ -98,7 +98,7 @@ private:
 
 
   inline double clamp_abs (double a, double b) {
-    return std::abs(a) < b ? std::abs(a) : b;
+    return std::abs(a) < b ? a : b * sign(a);
   }
   /*********************
   ** Dynamic Reconfigure

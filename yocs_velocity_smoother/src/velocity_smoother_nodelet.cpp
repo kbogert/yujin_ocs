@@ -51,7 +51,7 @@ void VelocitySmoother::reconfigCB(yocs_velocity_smoother::paramsConfig &config, 
   decel_factor = config.decel_factor;
   decel_lim_v  = decel_factor*accel_lim_v;
   decel_lim_w  = decel_factor*accel_lim_w;
-
+//  landing_coef = config.landing_coef;
   calculate_landing_coefficient();
 
 }
@@ -110,7 +110,6 @@ void VelocitySmoother::velocityCB(const geometry_msgs::Twist::ConstPtr& msg)
       msg->angular.z > 0.0 ? std::min(msg->angular.z, speed_lim_w) : std::max(msg->angular.z, -speed_lim_w);
 
   target_pos = geometry_msgs::Vector3();
-  dead_reckoning(target_vel, target_pos, cb_avg_time);
   current_pos = geometry_msgs::Vector3();
 
   calculate_landing_coefficient();
@@ -120,12 +119,10 @@ void VelocitySmoother::velocityCB(const geometry_msgs::Twist::ConstPtr& msg)
 void VelocitySmoother::calculate_landing_coefficient() {
   // use 95% of the maximum value to allow for some error in the accelleration limits
   if (target_vel.linear.x != 0)
-    landing_coef = 0.95 * accel_lim_w / (6 * target_vel.linear.x * target_vel.linear.x );
+    landing_coef = clamp_abs(0.95 * accel_lim_w / (6 * target_vel.linear.x * target_vel.linear.x ), 0.4);
   else
-    landing_coef = 100; // What should this be?
+    landing_coef = 0.4; // What should this be?
 
-  // fix this value for now for testing
-  landing_coef = 0.2;
 }
 
 void VelocitySmoother::odometryCB(const nav_msgs::Odometry::ConstPtr& msg)
@@ -193,42 +190,44 @@ void VelocitySmoother::spin()
 
     // Implementation of Koh, K., & Cho, H. (1999). A smooth path tracking algorithm for wheeled mobile robots with dynamic constraints. Journal of Intelligent and Robotic Systems, 367–385. Retrieved from http://link.springer.com/article/10.1023/A:1008045202113
     dead_reckoning(last_cmd_vel, current_pos, period);
+    dead_reckoning(target_vel, target_pos, period);
 
-    // find error in position and velocity
+    // reset the position of the vehicle so that we don't try to over-correct when the command is to stop
+    if (target_vel.linear.x == 0) {
+        current_pos.x = 0;
+        current_pos.y = 0;
+    }
+
+    // find error in position and velocity (eqs 22-24)
     double err_x = (target_pos.x - current_pos.x) * cos(target_pos.z) + (target_pos.y - current_pos.y) * sin(target_pos.z);
     double err_y = (target_pos.x - current_pos.x) * sin(target_pos.z) + (target_pos.y - current_pos.y) * cos(target_pos.z);
     double err_th = target_pos.z - current_pos.z;
 
- //   ROS_WARN("Errors: %f, %f, %f", err_x, err_y, err_th);
-
     // find new angular velocity command
-    // angle and velocity of the landing curve
+
+    // angle and velocity of the landing curve (eqs 37-39)
     double th_p = target_pos.z + atan( 3 * landing_coef * ( std::pow(std::abs(err_y / landing_coef), 2/3.0)) * sign(err_y));
-    double omega_p = target_vel.angular.z + err_y != 0 ? (2 / std::pow(std::abs(err_y / landing_coef), 1/3.0)) / (1 + tan(th_p - target_pos.z)*tan(th_p - target_pos.z)) * (-target_vel.angular.z * err_x + last_cmd_vel.linear.x * sin(err_th)) * sign(err_y) : 0;
+    double omega_p = target_vel.angular.z;
 
-//    ROS_WARN("Landing Curve: %f, %f", th_p, omega_p);
-//    ROS_WARN("Values: %f, %f, %f", landing_coef,  target_vel.angular.z, last_cmd_vel.linear.x);
+    // Paper convieniently left out this little case >:-|
+    if (err_y != 0)
+        omega_p += ((2 / std::pow(std::abs(err_y / landing_coef), 1/3.0)) / (1 + tan(th_p - target_pos.z)*tan(th_p - target_pos.z))) * (-target_vel.angular.z * err_x + last_cmd_vel.linear.x * sin(err_th)) * sign(err_y);
 
+    // angle and velocity subject to acceleration constraints (eqs 40-42)
+    // Note eq 40 has an error in it, we need to subtract omega_c from omega_p or else the target velocity is ignored and the angular velocity constantly increases
+    double omega_s = omega_p - current_vel.angular.z + sqrt(2 * accel_lim_w * std::abs(th_p - current_pos.z)) * sign(th_p - current_pos.z);
+    double ang_accel_limited = clamp_abs(omega_s / period, accel_lim_w);
 
-    // angle and velocity subject to acceleration constraints
-    double omega_s = omega_p + sqrt(2 * accel_lim_w * std::abs(th_p - current_pos.z)) * sign(th_p - current_pos.z);
-    double ang_accel_limited = clamp_abs(omega_s / period, accel_lim_w) * sign(omega_s);
-
-//    ROS_WARN("Angle and accel: %f, %f", omega_s, ang_accel_limited);
-
-    // find new linear velocity command
+    // find new linear velocity command (eqs 48-51)
     double v_s = target_vel.linear.x - current_vel.linear.x * cos(err_th) + target_vel.angular.z*err_y + sqrt(2 * accel_lim_v * std::abs(err_x)) * sign(err_x);
-    double lin_accel_limited = clamp_abs(v_s / period, accel_lim_v) * sign(v_s);
-
-//    ROS_WARN("Linear and accel: %f, %f", v_s, lin_accel_limited);
+    double lin_accel_limited = clamp_abs(v_s / period, accel_lim_v);
 
     cmd_vel->angular.z = last_cmd_vel.angular.z + ang_accel_limited * period;
     cmd_vel->linear.x = last_cmd_vel.linear.x + lin_accel_limited * period;
 
-//  For testing
-//    cmd_vel->angular.z = target_vel.angular.z;
-//    cmd_vel->linear.x = target_vel.linear.x;
-
+    // make sure we don't exceed the velocity limits (shouldn't happen anyway, but just in case)
+    cmd_vel->angular.z = clamp_abs(cmd_vel->angular.z, speed_lim_w);
+    cmd_vel->linear.x = clamp_abs(cmd_vel->linear.x, speed_lim_v);
 
 
     smooth_vel_pub.publish(cmd_vel);
@@ -289,7 +288,7 @@ bool VelocitySmoother::init(ros::NodeHandle& nh)
   target_vel = ZERO_VEL_COMMAND;
   current_pos = geometry_msgs::Vector3();
   current_vel = ZERO_VEL_COMMAND;
-  landing_coef = 0.2;
+  landing_coef = 0.2; // This can never be zero, initialize to something sane
 
   // Publishers and subscribers
   odometry_sub    = nh.subscribe("odometry",      1, &VelocitySmoother::odometryCB, this);
