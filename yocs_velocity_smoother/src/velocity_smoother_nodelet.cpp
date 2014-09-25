@@ -39,6 +39,8 @@ namespace yocs_velocity_smoother {
 ** Implementation
 **********************/
 
+#define LINEAR_THRESHOLD 0.001
+
 void VelocitySmoother::reconfigCB(yocs_velocity_smoother::paramsConfig &config, uint32_t level)
 {
   ROS_INFO("Reconfigure request : %f %f %f %f %f",
@@ -194,40 +196,45 @@ void VelocitySmoother::spin()
 
     // reset the position of the vehicle so that we don't try to over-correct when the command is to stop
     if (target_vel.linear.x == 0) {
-        current_pos.x = 0;
-        current_pos.y = 0;
+      current_pos.x = 0;
+      current_pos.y = 0;
     }
 
-    // find error in position and velocity (eqs 22-24)
-    double err_x = (target_pos.x - current_pos.x) * cos(target_pos.z) + (target_pos.y - current_pos.y) * sin(target_pos.z);
-    double err_y = (target_pos.x - current_pos.x) * sin(target_pos.z) + (target_pos.y - current_pos.y) * cos(target_pos.z);
-    double err_th = target_pos.z - current_pos.z;
+    // prevent micro oscilations when holding position
+    if (! (IS_ZERO_VEOCITY(target_vel) && std::abs(current_vel.linear.x) < LINEAR_THRESHOLD && std::abs(current_vel.angular.z) < accel_lim_w * period * 0.6)) {
 
-    // find new angular velocity command
+      // find error in position and velocity (eqs 22-24)
+      double err_x = (target_pos.x - current_pos.x) * cos(target_pos.z) + (target_pos.y - current_pos.y) * sin(target_pos.z);
+      double err_y = (target_pos.x - current_pos.x) * sin(target_pos.z) + (target_pos.y - current_pos.y) * cos(target_pos.z);
+      double err_th = target_pos.z - current_pos.z;
 
-    // angle and velocity of the landing curve (eqs 37-39)
-    double th_p = target_pos.z + atan( 3 * landing_coef * ( std::pow(std::abs(err_y / landing_coef), 2/3.0)) * sign(err_y));
-    double omega_p = target_vel.angular.z;
+      // find new angular velocity command
 
-    // Paper convieniently left out this little case >:-|
-    if (err_y != 0)
+      // angle and velocity of the landing curve (eqs 37-39)
+      double th_p = target_pos.z + atan( 3 * landing_coef * ( std::pow(std::abs(err_y / landing_coef), 2/3.0)) * sign(err_y));
+      double omega_p = target_vel.angular.z;
+
+      // Paper convieniently left out this little case >:-|
+      if (err_y != 0)
         omega_p += ((2 / std::pow(std::abs(err_y / landing_coef), 1/3.0)) / (1 + tan(th_p - target_pos.z)*tan(th_p - target_pos.z))) * (-target_vel.angular.z * err_x + last_cmd_vel.linear.x * sin(err_th)) * sign(err_y);
 
-    // angle and velocity subject to acceleration constraints (eqs 40-42)
-    // Note eq 40 has an error in it, we need to subtract omega_c from omega_p or else the target velocity is ignored and the angular velocity constantly increases
-    double omega_s = omega_p - current_vel.angular.z + sqrt(2 * accel_lim_w * std::abs(th_p - current_pos.z)) * sign(th_p - current_pos.z);
-    double ang_accel_limited = clamp_abs(omega_s / period, accel_lim_w);
+      // angle and velocity subject to acceleration constraints (eqs 40-42)
+      // Note eq 40 has an error in it, we need to subtract omega_c from omega_p or else the target velocity is ignored and the angular velocity constantly increases
+      double omega_s = omega_p - current_vel.angular.z + sqrt(2 * accel_lim_w * std::abs(th_p - current_pos.z)) * sign(th_p - current_pos.z);
+      double ang_accel_limited = clamp_abs(omega_s / period, accel_lim_w);
 
-    // find new linear velocity command (eqs 48-51)
-    double v_s = target_vel.linear.x - current_vel.linear.x * cos(err_th) + target_vel.angular.z*err_y + sqrt(2 * accel_lim_v * std::abs(err_x)) * sign(err_x);
-    double lin_accel_limited = clamp_abs(v_s / period, accel_lim_v);
+      // find new linear velocity command (eqs 48-51)
+      double v_s = target_vel.linear.x - current_vel.linear.x * cos(err_th) + target_vel.angular.z*err_y + sqrt(2 * accel_lim_v * std::abs(err_x)) * sign(err_x);
+      double lin_accel_limited = clamp_abs(v_s / period, accel_lim_v);
 
-    cmd_vel->angular.z = last_cmd_vel.angular.z + ang_accel_limited * period;
-    cmd_vel->linear.x = last_cmd_vel.linear.x + lin_accel_limited * period;
+      cmd_vel->angular.z = last_cmd_vel.angular.z + ang_accel_limited * period;
+      cmd_vel->linear.x = last_cmd_vel.linear.x + lin_accel_limited * period;
 
-    // make sure we don't exceed the velocity limits (shouldn't happen anyway, but just in case)
-    cmd_vel->angular.z = clamp_abs(cmd_vel->angular.z, speed_lim_w);
-    cmd_vel->linear.x = clamp_abs(cmd_vel->linear.x, speed_lim_v);
+      // make sure we don't exceed the velocity limits (shouldn't happen anyway, but just in case)
+      cmd_vel->angular.z = clamp_abs(cmd_vel->angular.z, speed_lim_w);
+      cmd_vel->linear.x = clamp_abs(cmd_vel->linear.x, speed_lim_v);
+
+    }
 
 
     smooth_vel_pub.publish(cmd_vel);
