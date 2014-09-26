@@ -39,8 +39,6 @@ namespace yocs_velocity_smoother {
 ** Implementation
 **********************/
 
-#define LINEAR_THRESHOLD 0.001
-
 void VelocitySmoother::reconfigCB(yocs_velocity_smoother::paramsConfig &config, uint32_t level)
 {
   ROS_INFO("Reconfigure request : %f %f %f %f %f",
@@ -205,7 +203,7 @@ void VelocitySmoother::spin()
     double err_th = target_pos.z - current_pos.z;
 
     // prevent micro oscilations when holding position
-    if (! (IS_ZERO_VEOCITY(target_vel) && std::abs(current_vel.linear.x) < LINEAR_THRESHOLD && std::abs(current_vel.angular.z) < accel_lim_w * period * 0.6 && std::abs(err_th) < 0.01)) {
+    if (! (IS_ZERO_VEOCITY(target_vel) && std::abs(current_vel.linear.x) < 0.001 && std::abs(current_vel.angular.z) < accel_lim_w * period * 0.6 && std::abs(err_th) < accel_lim_w * period * period * 0.6)) {
 
       double err_x = (target_pos.x - current_pos.x) * cos(target_pos.z) + (target_pos.y - current_pos.y) * sin(target_pos.z);
       double err_y = (target_pos.x - current_pos.x) * sin(target_pos.z) + (target_pos.y - current_pos.y) * cos(target_pos.z);
