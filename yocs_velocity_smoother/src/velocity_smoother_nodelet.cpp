@@ -21,6 +21,8 @@
 
 #include "yocs_velocity_smoother/velocity_smoother_nodelet.hpp"
 
+#include <cmath>
+
 /*****************************************************************************
  ** Preprocessing
  *****************************************************************************/
@@ -113,6 +115,7 @@ void VelocitySmoother::velocityCB(const geometry_msgs::Twist::ConstPtr& msg)
   current_pos = geometry_msgs::Vector3();
 
   calculate_landing_coefficient();
+
 }
 
 // recalculate Cx, equation 47
@@ -210,13 +213,15 @@ void VelocitySmoother::spin()
 
       // find new angular velocity command
 
+      double err_y_over_Cx_cbrt = cbrt(std::abs(err_y / landing_coef));
+
       // angle and velocity of the landing curve (eqs 37-39)
-      double th_p = target_pos.z + atan( 3 * landing_coef * ( std::pow(std::abs(err_y / landing_coef), 2/3.0)) * sign(err_y));
+      double th_p = target_pos.z + atan( 3 * landing_coef * ( err_y_over_Cx_cbrt * err_y_over_Cx_cbrt ) * sign(err_y));
       double omega_p = target_vel.angular.z;
 
       // Paper convieniently left out this little case >:-|
       if (err_y != 0)
-        omega_p += ((2 / std::pow(std::abs(err_y / landing_coef), 1/3.0)) / (1 + tan(th_p - target_pos.z)*tan(th_p - target_pos.z))) * (-target_vel.angular.z * err_x + last_cmd_vel.linear.x * sin(err_th)) * sign(err_y);
+        omega_p += ((2 / err_y_over_Cx_cbrt) / (1 + tan(th_p - target_pos.z)*tan(th_p - target_pos.z))) * (-target_vel.angular.z * err_x + last_cmd_vel.linear.x * sin(err_th)) * sign(err_y);
 
       // angle and velocity subject to acceleration constraints (eqs 40-42)
       // Note eq 40 has an error in it, we need to subtract omega_c from omega_p or else the target velocity is ignored and the angular velocity constantly increases
