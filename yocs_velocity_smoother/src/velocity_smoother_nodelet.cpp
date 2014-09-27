@@ -202,14 +202,16 @@ void VelocitySmoother::spin()
     }
 
 
-    // find error in position and velocity (eqs 22-24)
+    // find error in position (eqs 22-24)
     double err_th = target_pos.z - current_pos.z;
+    double err_x = (target_pos.x - current_pos.x) * cos(target_pos.z) + (target_pos.y - current_pos.y) * sin(target_pos.z);
+    double err_y = (target_pos.x - current_pos.x) * sin(target_pos.z) + (target_pos.y - current_pos.y) * cos(target_pos.z);
 
-    // prevent micro oscilations when holding position
-    if (! (IS_ZERO_VEOCITY(target_vel) && std::abs(current_vel.linear.x) < 0.001 && std::abs(current_vel.angular.z) < accel_lim_w * period * 0.6 && std::abs(err_th) < accel_lim_w * period * period * 0.6)) {
-
-      double err_x = (target_pos.x - current_pos.x) * cos(target_pos.z) + (target_pos.y - current_pos.y) * sin(target_pos.z);
-      double err_y = (target_pos.x - current_pos.x) * sin(target_pos.z) + (target_pos.y - current_pos.y) * cos(target_pos.z);
+    // prevent micro oscillations when reaching the goal position and velocity
+    if (! (std::abs(target_vel.linear.x - current_vel.linear.x) <= accel_lim_v * period * 0.51 &&
+           std::abs(target_vel.angular.z - current_vel.angular.z) <= accel_lim_w * period * 0.51 &&
+           std::abs(sqrt(err_x*err_x + err_y*err_y)) <= accel_lim_v * period * period * 0.51 &&
+           std::abs(err_th) <= accel_lim_w * period * period * 0.51)) {
 
       // find new angular velocity command
 
