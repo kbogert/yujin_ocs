@@ -208,10 +208,9 @@ void VelocitySmoother::spin()
     double err_y = (target_pos.x - current_pos.x) * sin(target_pos.z) + (target_pos.y - current_pos.y) * cos(target_pos.z);
 
     // prevent micro oscillations when reaching the goal position and velocity
-    if (! (std::abs(target_vel.linear.x - current_vel.linear.x) <= accel_lim_v * period * 0.51 &&
-           std::abs(target_vel.angular.z - current_vel.angular.z) <= accel_lim_w * period * 0.51 &&
-           std::abs(sqrt(err_x*err_x + err_y*err_y)) <= accel_lim_v * period * period * 0.51 &&
-           std::abs(err_th) <= accel_lim_w * period * period * 0.51)) {
+    if (! (std::abs(target_vel.angular.z - current_vel.angular.z) <= accel_lim_w * period * 0.6 &&
+           std::abs(err_th) <= accel_lim_w * period * period * 0.6)) 
+    {
 
       // find new angular velocity command
 
@@ -230,15 +229,22 @@ void VelocitySmoother::spin()
       double omega_s = omega_p - current_vel.angular.z + sqrt(2 * accel_lim_w * std::abs(th_p - current_pos.z)) * sign(th_p - current_pos.z);
       double ang_accel_limited = clamp_abs(omega_s / period, accel_lim_w);
 
+      cmd_vel->angular.z = last_cmd_vel.angular.z + ang_accel_limited * period;
+
+      // make sure we don't exceed the velocity limits (shouldn't happen anyway, but just in case)
+      cmd_vel->angular.z = clamp_abs(cmd_vel->angular.z, speed_lim_w);
+    }
+    if (! (std::abs(target_vel.linear.x - current_vel.linear.x) <= accel_lim_v * period &&
+           std::abs(sqrt(err_x*err_x + err_y*err_y)) <= accel_lim_v * period * period)) 
+    {
+
       // find new linear velocity command (eqs 48-51)
       double v_s = target_vel.linear.x - current_vel.linear.x * cos(err_th) + target_vel.angular.z*err_y + sqrt(2 * accel_lim_v * std::abs(err_x)) * sign(err_x);
       double lin_accel_limited = clamp_abs(v_s / period, accel_lim_v);
 
-      cmd_vel->angular.z = last_cmd_vel.angular.z + ang_accel_limited * period;
       cmd_vel->linear.x = last_cmd_vel.linear.x + lin_accel_limited * period;
 
       // make sure we don't exceed the velocity limits (shouldn't happen anyway, but just in case)
-      cmd_vel->angular.z = clamp_abs(cmd_vel->angular.z, speed_lim_w);
       cmd_vel->linear.x = clamp_abs(cmd_vel->linear.x, speed_lim_v);
 
     }
