@@ -208,8 +208,12 @@ void VelocitySmoother::spin()
     double err_y = (target_pos.x - current_pos.x) * sin(target_pos.z) + (target_pos.y - current_pos.y) * cos(target_pos.z);
 
     // prevent micro oscillations when reaching the goal position and velocity
-    if (! (std::abs(target_vel.angular.z - current_vel.angular.z) <= accel_lim_w * period * 0.6 &&
-           std::abs(err_th) <= accel_lim_w * period * period * 0.6)) 
+    if (std::abs(target_vel.angular.z - current_vel.angular.z) <= accel_lim_w * period * 0.6 &&
+        std::abs(err_th) <= accel_lim_w * period * period * 0.6)
+    {
+      current_pos.z = target_pos.z;
+    }
+    else
     {
 
       // find new angular velocity command
@@ -234,8 +238,15 @@ void VelocitySmoother::spin()
       // make sure we don't exceed the velocity limits (shouldn't happen anyway, but just in case)
       cmd_vel->angular.z = clamp_abs(cmd_vel->angular.z, speed_lim_w);
     }
-    if (! (std::abs(target_vel.linear.x - current_vel.linear.x) <= accel_lim_v * period &&
-           std::abs(sqrt(err_x*err_x + err_y*err_y)) <= accel_lim_v * period * period)) 
+
+    // prevent micro oscillations when reaching the goal position and velocity
+    if (std::abs(target_vel.linear.x - current_vel.linear.x) <= accel_lim_v * period &&
+        std::abs(sqrt(err_x*err_x + err_y*err_y)) <= accel_lim_v * period * period)
+    {
+      current_pos.x = target_pos.x;
+      current_pos.y = target_pos.y;
+    }
+    else
     {
 
       // find new linear velocity command (eqs 48-51)
